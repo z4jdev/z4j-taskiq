@@ -5,7 +5,7 @@ from __future__ import annotations
 from z4j_taskiq.engine import TaskiqEngineAdapter
 from z4j_taskiq.events import Z4JTaskiqMiddleware, attach_to_broker
 
-__version__ = "1.0.0"
+__version__ = "1.3.0"
 
 __all__ = [
     "TaskiqEngineAdapter",
