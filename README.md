@@ -6,10 +6,22 @@
 
 The TaskIQ engine adapter for [z4j](https://z4j.com).
 
-Streams TaskIQ task lifecycle events to the z4j brain and
-accepts control actions (retry, cancel, bulk retry, purge) from
-the dashboard. Pair with z4j-taskiqscheduler to surface
-TaskIQ scheduler jobs.
+Streams every TaskIQ task lifecycle event from your async workers to
+the z4j brain and accepts operator control actions from the dashboard.
+Pair with z4j-taskiqscheduler to surface taskiq-scheduler periodic jobs.
+
+## What it ships
+
+| Capability | Notes |
+|---|---|
+| Task lifecycle events | enqueued, started, succeeded, failed, retried |
+| Task discovery | runtime broker-task registry merge + static scan |
+| Submit / retry / cancel | direct against the TaskIQ broker |
+| Bulk retry | filter-driven; re-enqueues matching tasks |
+| Purge queue | with confirm-token guard |
+| Reconcile task | via the configured TaskIQ result backend |
+
+Async-native — uses TaskIQ's middleware hook system.
 
 ## Install
 
@@ -17,9 +29,23 @@ TaskIQ scheduler jobs.
 pip install z4j-taskiq z4j-taskiqscheduler
 ```
 
+Pair with a framework adapter:
+
+```bash
+pip install z4j-fastapi z4j-taskiq z4j-taskiqscheduler
+pip install z4j-bare    z4j-taskiq z4j-taskiqscheduler   # framework-free worker
+```
+
 ## Pairs with
 
 - [`z4j-taskiqscheduler`](https://github.com/z4jdev/z4j-taskiqscheduler) — schedule adapter for taskiq-scheduler
+
+## Reliability
+
+- No exception from the adapter ever propagates back into TaskIQ
+  middleware or your task code.
+- Events buffer locally when the brain is unreachable; workers never
+  block on network I/O.
 
 ## Documentation
 
