@@ -21,7 +21,7 @@ Pair with z4j-taskiqscheduler to surface taskiq-scheduler periodic jobs.
 | Purge queue | with confirm-token guard |
 | Reconcile task | via the configured TaskIQ result backend |
 
-Async-native — uses TaskIQ's middleware hook system.
+Async-native, uses TaskIQ's middleware hook system.
 
 ## Install
 
@@ -38,7 +38,7 @@ pip install z4j-bare    z4j-taskiq z4j-taskiqscheduler   # framework-free worker
 
 ## Pairs with
 
-- [`z4j-taskiqscheduler`](https://github.com/z4jdev/z4j-taskiqscheduler) — schedule adapter for taskiq-scheduler
+- [`z4j-taskiqscheduler`](https://github.com/z4jdev/z4j-taskiqscheduler), schedule adapter for taskiq-scheduler
 
 ## Reliability
 
@@ -53,7 +53,7 @@ Full docs at [z4j.dev/engines/taskiq/](https://z4j.dev/engines/taskiq/).
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Apache-2.0, see [LICENSE](LICENSE).
 
 ## Links
 
