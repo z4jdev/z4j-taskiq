@@ -1,8 +1,8 @@
 # z4j-taskiq
 
-[![PyPI version](https://img.shields.io/pypi/v/z4j-taskiq.svg)](https://pypi.org/project/z4j-taskiq/)
-[![Python](https://img.shields.io/pypi/pyversions/z4j-taskiq.svg)](https://pypi.org/project/z4j-taskiq/)
-[![License](https://img.shields.io/pypi/l/z4j-taskiq.svg)](https://github.com/z4jdev/z4j-taskiq/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/z4j-taskiq.svg?v=1.4.0)](https://pypi.org/project/z4j-taskiq/)
+[![Python](https://img.shields.io/pypi/pyversions/z4j-taskiq.svg?v=1.4.0)](https://pypi.org/project/z4j-taskiq/)
+[![License](https://img.shields.io/pypi/l/z4j-taskiq.svg?v=1.4.0)](https://github.com/z4jdev/z4j-taskiq/blob/main/LICENSE)
 
 The TaskIQ engine adapter for [z4j](https://z4j.com).
 
