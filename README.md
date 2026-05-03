@@ -7,7 +7,7 @@
 The TaskIQ engine adapter for [z4j](https://z4j.com).
 
 Streams every TaskIQ task lifecycle event from your async workers to
-the z4j brain and accepts operator control actions from the dashboard.
+z4j and accepts operator control actions from the dashboard.
 Pair with z4j-taskiqscheduler to surface taskiq-scheduler periodic jobs.
 
 ## What it ships
@@ -44,7 +44,7 @@ pip install z4j-bare    z4j-taskiq z4j-taskiqscheduler   # framework-free worker
 
 - No exception from the adapter ever propagates back into TaskIQ
   middleware or your task code.
-- Events buffer locally when the brain is unreachable; workers never
+- Events buffer locally when z4j is unreachable; workers never
   block on network I/O.
 
 ## Documentation
