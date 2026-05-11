@@ -30,7 +30,7 @@ from z4j_core.version import PROTOCOL_VERSION
 
 from z4j_taskiq.capabilities import DEFAULT_CAPABILITIES
 
-logger = logging.getLogger("z4j.agent.taskiq.engine")
+logger = logging.getLogger("z4j.adapter.taskiq.engine")
 
 ENGINE_NAME = "taskiq"
 

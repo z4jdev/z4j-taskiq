@@ -30,7 +30,7 @@ from taskiq import TaskiqMessage, TaskiqMiddleware
 from z4j_core.models import Event
 from z4j_core.models.event import EventKind
 
-logger = logging.getLogger("z4j.agent.taskiq.events")
+logger = logging.getLogger("z4j.adapter.taskiq.events")
 
 ENGINE_NAME = "taskiq"
 
