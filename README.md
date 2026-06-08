@@ -1,14 +1,21 @@
 # z4j-taskiq
 
-[![PyPI version](https://img.shields.io/pypi/v/z4j-taskiq.svg?v=1.4.0)](https://pypi.org/project/z4j-taskiq/)
-[![Python](https://img.shields.io/pypi/pyversions/z4j-taskiq.svg?v=1.4.0)](https://pypi.org/project/z4j-taskiq/)
-[![License](https://img.shields.io/pypi/l/z4j-taskiq.svg?v=1.4.0)](https://github.com/z4jdev/z4j-taskiq/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/z4j-taskiq.svg?v=1.6.7)](https://pypi.org/project/z4j-taskiq/)
+[![Python](https://img.shields.io/pypi/pyversions/z4j-taskiq.svg?v=1.6.7)](https://pypi.org/project/z4j-taskiq/)
+[![License](https://img.shields.io/pypi/l/z4j-taskiq.svg?v=1.6.7)](https://github.com/z4jdev/z4j-taskiq/blob/main/LICENSE)
 
 The TaskIQ engine adapter for [z4j](https://z4j.com).
 
 Streams every TaskIQ task lifecycle event from your async workers to
 z4j and accepts operator control actions from the dashboard.
 Pair with z4j-taskiqscheduler to surface taskiq-scheduler periodic jobs.
+
+## Compatibility
+
+- TaskIQ 0.11+ and <1 (capped below the eventual TaskIQ 1.0 breaking-major)
+- Python 3.10+
+
+Full per-adapter matrix at <https://z4j.dev/reference/compatibility/>.
 
 ## What it ships
 

@@ -1,9 +1,9 @@
 [project]
 name = "z4j-taskiq"
-version = "1.6.0"
+version = "1.6.7"
 description = "z4j taskiq queue engine adapter (Apache 2.0)"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "z4j contributors" }]
 keywords = ["z4j", "taskiq", "asyncio", "task", "queue"]
@@ -13,6 +13,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
