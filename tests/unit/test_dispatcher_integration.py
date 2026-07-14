@@ -9,13 +9,11 @@ import pytest
 
 pytest.importorskip("taskiq")
 
-from taskiq import InMemoryBroker  # noqa: E402
-
-from z4j_bare.buffer import BufferStore  # noqa: E402
-from z4j_bare.dispatcher import CommandDispatcher  # noqa: E402
-from z4j_core.transport.frames import CommandFrame, CommandPayload  # noqa: E402
-
-from z4j_taskiq import TaskiqEngineAdapter  # noqa: E402
+from taskiq import InMemoryBroker
+from z4j_bare.buffer import BufferStore
+from z4j_bare.dispatcher import CommandDispatcher
+from z4j_core.transport.frames import CommandFrame, CommandPayload
+from z4j_taskiq import TaskiqEngineAdapter
 
 
 @pytest.fixture
@@ -40,7 +38,8 @@ async def broker():
 
 @pytest.mark.asyncio
 async def test_schedule_fire_end_to_end_through_dispatcher(
-    broker, buf: BufferStore,
+    broker,
+    buf: BufferStore,
 ) -> None:
     engine = TaskiqEngineAdapter(broker=broker)
     dispatcher = CommandDispatcher(
@@ -49,9 +48,7 @@ async def test_schedule_fire_end_to_end_through_dispatcher(
         buffer=buf,
     )
 
-    name = next(
-        k for k in broker.get_all_tasks() if k.endswith(":send_email")
-    )
+    name = next(k for k in broker.get_all_tasks() if k.endswith(":send_email"))
 
     frame = CommandFrame(
         id="cmd_e2e_taskiq_01",
@@ -75,9 +72,7 @@ async def test_schedule_fire_end_to_end_through_dispatcher(
 
     results = [e for e in buf.drain(10) if e.kind == "command_result"]
     parsed = json.loads(results[0].payload.decode("utf-8"))
-    assert parsed["payload"]["status"] == "success", (
-        f"got {parsed['payload'].get('error')!r}"
-    )
+    assert parsed["payload"]["status"] == "success", f"got {parsed['payload'].get('error')!r}"
     assert parsed["payload"]["result"]["engine"] == "taskiq"
     assert isinstance(parsed["payload"]["result"]["task_id"], str)
     assert len(parsed["payload"]["result"]["task_id"]) > 0

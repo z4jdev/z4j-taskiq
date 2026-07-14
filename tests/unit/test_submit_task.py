@@ -20,9 +20,8 @@ import pytest
 
 pytest.importorskip("taskiq")
 
-from taskiq import InMemoryBroker  # noqa: E402
-
-from z4j_taskiq import TaskiqEngineAdapter  # noqa: E402
+from taskiq import InMemoryBroker
+from z4j_taskiq import TaskiqEngineAdapter
 
 
 @pytest.fixture
@@ -60,7 +59,9 @@ class TestSubmitTask:
         assert "submit_task" in adapter.capabilities()
 
     async def test_known_task_kiqs_and_returns_task_id(
-        self, adapter, broker,
+        self,
+        adapter,
+        broker,
     ) -> None:
         name = _registered_name(broker, ":send_email")
         result = await adapter.submit_task(

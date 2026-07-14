@@ -1,8 +1,8 @@
 # z4j-taskiq
 
-[![PyPI version](https://img.shields.io/pypi/v/z4j-taskiq.svg?v=1.6.7)](https://pypi.org/project/z4j-taskiq/)
-[![Python](https://img.shields.io/pypi/pyversions/z4j-taskiq.svg?v=1.6.7)](https://pypi.org/project/z4j-taskiq/)
-[![License](https://img.shields.io/pypi/l/z4j-taskiq.svg?v=1.6.7)](https://github.com/z4jdev/z4j-taskiq/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/z4j-taskiq.svg?v=1.7.0)](https://pypi.org/project/z4j-taskiq/)
+[![Python](https://img.shields.io/pypi/pyversions/z4j-taskiq.svg?v=1.7.0)](https://pypi.org/project/z4j-taskiq/)
+[![License](https://img.shields.io/pypi/l/z4j-taskiq.svg?v=1.7.0)](https://github.com/z4jdev/z4j-taskiq/blob/main/LICENSE)
 
 The TaskIQ engine adapter for [z4j](https://z4j.com).
 
@@ -13,7 +13,7 @@ Pair with z4j-taskiqscheduler to surface taskiq-scheduler periodic jobs.
 ## Compatibility
 
 - TaskIQ 0.11+ and <1 (capped below the eventual TaskIQ 1.0 breaking-major)
-- Python 3.10+
+- Python 3.11+
 
 Full per-adapter matrix at <https://z4j.dev/reference/compatibility/>.
 
@@ -21,14 +21,17 @@ Full per-adapter matrix at <https://z4j.dev/reference/compatibility/>.
 
 | Capability | Notes |
 |---|---|
-| Task lifecycle events | enqueued, started, succeeded, failed, retried |
-| Task discovery | runtime broker-task registry merge + static scan |
-| Submit / retry / cancel | direct against the TaskIQ broker |
-| Bulk retry | filter-driven; re-enqueues matching tasks |
-| Purge queue | with confirm-token guard |
+| Task lifecycle events | enqueued, started, succeeded, failed |
+| Task discovery | runtime broker task registry (`broker.get_all_tasks()`) |
+| Submit task | enqueue a registered task against the TaskIQ broker via `.kiq()` |
 | Reconcile task | via the configured TaskIQ result backend |
 
 Async-native, uses TaskIQ's middleware hook system.
+
+Control actions beyond submit (retry, cancel, bulk retry, purge queue)
+are not yet supported. TaskIQ's broker-agnostic design means each broker
+needs its own implementation, so the dashboard greys these actions out
+for TaskIQ engines until per-broker support lands.
 
 ## Install
 

@@ -15,9 +15,7 @@ pytest.importorskip("taskiq")
 pytestmark = pytest.mark.integration
 
 from taskiq import InMemoryBroker  # noqa: E402
-
 from z4j_core.models.event import EventKind  # noqa: E402
-
 from z4j_taskiq import TaskiqEngineAdapter, attach_to_broker  # noqa: E402
 
 
@@ -40,7 +38,7 @@ async def broker_with_middleware():
 
 @pytest.mark.asyncio
 async def test_full_lifecycle(broker_with_middleware):
-    broker, adapter, add = broker_with_middleware
+    _broker, adapter, add = broker_with_middleware
 
     # Discovery.
     defs = await adapter.discover_tasks()

@@ -70,7 +70,7 @@ class TaskiqEngineAdapter:
 
     async def discover_tasks(
         self,
-        hints: DiscoveryHints | None = None,  # noqa: ARG002
+        hints: DiscoveryHints | None = None,
     ) -> list[TaskDefinition]:
         """Return one TaskDefinition per ``@broker.task`` decorator.
 
@@ -80,7 +80,7 @@ class TaskiqEngineAdapter:
         """
         try:
             tasks = self.broker.get_all_tasks()
-        except Exception:  # noqa: BLE001
+        except Exception:
             return []
         return [
             TaskDefinition(
@@ -126,7 +126,7 @@ class TaskiqEngineAdapter:
             return None
         try:
             ready = await backend.is_result_ready(task_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
         if not ready:
             return None
@@ -161,7 +161,7 @@ class TaskiqEngineAdapter:
 
         try:
             ready = await backend.is_result_ready(task_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return CommandResult(
                 status="success",
                 result={
@@ -185,7 +185,7 @@ class TaskiqEngineAdapter:
 
         try:
             result = await backend.get_result(task_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return CommandResult(
                 status="success",
                 result={
@@ -222,16 +222,16 @@ class TaskiqEngineAdapter:
         *,
         args: tuple[Any, ...] = (),
         kwargs: dict[str, Any] | None = None,
-        queue: str | None = None,  # noqa: ARG002 - taskiq routes per-broker
-        eta: float | None = None,  # noqa: ARG002 - TODO: schedule via labels
-        priority: int | None = None,  # noqa: ARG002
+        queue: str | None = None,
+        eta: float | None = None,
+        priority: int | None = None,
     ) -> CommandResult:
         """Universal enqueue - looks up the registered task by name
         and kicks it via taskiq's normal ``.kiq()`` path.
         """
         try:
             fn = self.broker.find_task(name)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return CommandResult(status="failed", error=str(exc))
         if fn is None:
             return CommandResult(
@@ -240,7 +240,7 @@ class TaskiqEngineAdapter:
             )
         try:
             sent = await fn.kiq(*args, **(kwargs or {}))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return CommandResult(status="failed", error=str(exc))
         return CommandResult(
             status="success",
@@ -249,12 +249,12 @@ class TaskiqEngineAdapter:
 
     async def retry_task(
         self,
-        task_id: str,  # noqa: ARG002
+        task_id: str,
         *,
-        override_args: tuple[Any, ...] | None = None,  # noqa: ARG002
-        override_kwargs: dict[str, Any] | None = None,  # noqa: ARG002
-        eta: float | None = None,  # noqa: ARG002
-        priority: int | None = None,  # noqa: ARG002
+        override_args: tuple[Any, ...] | None = None,
+        override_kwargs: dict[str, Any] | None = None,
+        eta: float | None = None,
+        priority: int | None = None,
     ) -> CommandResult:
         # Brain polyfills via submit_task using its captured args.
         return CommandResult(
@@ -265,7 +265,7 @@ class TaskiqEngineAdapter:
             ),
         )
 
-    async def cancel_task(self, task_id: str) -> CommandResult:  # noqa: ARG002
+    async def cancel_task(self, task_id: str) -> CommandResult:
         return CommandResult(
             status="failed",
             error=(
@@ -275,7 +275,10 @@ class TaskiqEngineAdapter:
         )
 
     async def bulk_retry(
-        self, filter: dict[str, Any], *, max: int = 1000,  # noqa: A002, ARG002
+        self,
+        filter: dict[str, Any],  # noqa: A002  public bulk_retry signature
+        *,
+        max: int = 1000,  # noqa: A002  public bulk_retry signature
     ) -> CommandResult:
         return CommandResult(
             status="failed",
@@ -284,17 +287,17 @@ class TaskiqEngineAdapter:
 
     async def purge_queue(
         self,
-        queue_name: str,  # noqa: ARG002
+        queue_name: str,
         *,
-        confirm_token: str | None = None,  # noqa: ARG002
-        force: bool = False,  # noqa: ARG002
+        confirm_token: str | None = None,
+        force: bool = False,
     ) -> CommandResult:
         return CommandResult(
             status="failed",
             error="purge_queue not implemented in z4j-taskiq v1",
         )
 
-    async def requeue_dead_letter(self, task_id: str) -> CommandResult:  # noqa: ARG002
+    async def requeue_dead_letter(self, task_id: str) -> CommandResult:
         return CommandResult(
             status="failed",
             error="taskiq DLQ semantics are broker-specific; deferred to v1.1",
@@ -302,17 +305,17 @@ class TaskiqEngineAdapter:
 
     async def rate_limit(
         self,
-        task_name: str,  # noqa: ARG002
-        rate: str,  # noqa: ARG002
+        task_name: str,
+        rate: str,
         *,
-        worker_name: str | None = None,  # noqa: ARG002
+        worker_name: str | None = None,
     ) -> CommandResult:
         return CommandResult(
             status="failed",
             error="rate_limit not supported by taskiq",
         )
 
-    async def restart_worker(self, worker_id: str) -> CommandResult:  # noqa: ARG002
+    async def restart_worker(self, worker_id: str) -> CommandResult:
         return CommandResult(
             status="failed",
             error="taskiq workers expose no remote restart",

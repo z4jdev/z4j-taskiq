@@ -6,9 +6,8 @@ import pytest
 
 pytest.importorskip("taskiq")
 
-from taskiq import InMemoryBroker  # noqa: E402
-
-from z4j_taskiq import TaskiqEngineAdapter  # noqa: E402
+from taskiq import InMemoryBroker
+from z4j_taskiq import TaskiqEngineAdapter
 
 
 @pytest.fixture
@@ -70,7 +69,7 @@ async def test_reconcile_unknown_task(adapter):
 @pytest.mark.asyncio
 async def test_reconcile_completed_task_returns_success(broker, adapter):
     # Kick the task and wait for it to complete via the in-memory backend.
-    add = broker.find_task("add") or list(broker.get_all_tasks().values())[0]
+    add = broker.find_task("add") or next(iter(broker.get_all_tasks().values()))
     sent = await add.kiq(2, 3)
     result = await sent.wait_result(timeout=2)
     assert result.return_value == 5

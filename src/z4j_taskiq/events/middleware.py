@@ -26,7 +26,6 @@ from typing import Any
 from uuid import uuid4
 
 from taskiq import TaskiqMessage, TaskiqMiddleware
-
 from z4j_core.models import Event
 from z4j_core.models.event import EventKind
 
@@ -58,7 +57,8 @@ class Z4JTaskiqMiddleware(TaskiqMiddleware):
             self._queue.put_nowait(evt)
         except asyncio.QueueFull:
             logger.warning(
-                "z4j-taskiq: event queue full; dropping %s", evt.kind,
+                "z4j-taskiq: event queue full; dropping %s",
+                evt.kind,
             )
 
     async def pre_send(self, message: TaskiqMessage) -> TaskiqMessage:
@@ -77,7 +77,10 @@ class Z4JTaskiqMiddleware(TaskiqMiddleware):
         self._put(self._build(kind, message))
 
     async def on_error(
-        self, message: TaskiqMessage, result: Any, exception: BaseException,  # noqa: ARG002
+        self,
+        message: TaskiqMessage,
+        result: Any,
+        exception: BaseException,
     ) -> None:
         evt = self._build(EventKind.TASK_FAILED, message, exception=exception)
         self._put(evt)
@@ -96,10 +99,16 @@ class Z4JTaskiqMiddleware(TaskiqMiddleware):
             args = list(message.args or [])
             kwargs = dict(message.kwargs or {})
             if self._redaction is not None:
+                # RedactionEngine's API is scrub() (recursive over
+                # lists/dicts). The redact_args/redact_kwargs calls
+                # this previously made never existed, and the blanket
+                # except silently replaced EVERY task's args/kwargs
+                # with empty whenever redaction was configured
+                # (1.7.0 release-validation blocker).
                 try:
-                    args = self._redaction.redact_args(tuple(args))
-                    kwargs = self._redaction.redact_kwargs(kwargs)
-                except Exception:  # noqa: BLE001
+                    args = list(self._redaction.scrub(list(args)))
+                    kwargs = dict(self._redaction.scrub(dict(kwargs)))
+                except Exception:
                     args, kwargs = [], {}
             data["args"] = list(args)
             data["kwargs"] = kwargs
