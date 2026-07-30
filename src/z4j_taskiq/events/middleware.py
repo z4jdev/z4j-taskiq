@@ -3,9 +3,10 @@
 taskiq's middleware system gives us four useful hooks:
 ``pre_send`` (broker enqueue), ``pre_execute`` (worker pickup),
 ``post_execute`` (worker completion success), ``on_error``
-(worker completion failure). All four run on the worker's own
-asyncio loop, so we can put events directly on the queue
-without ``call_soon_threadsafe``.
+(worker completion failure). These run on the taskiq worker's own
+asyncio loop; the z4j agent drains the queue on a DIFFERENT loop
+(its background-thread runtime), so events are handed across via
+``call_soon_threadsafe`` (see ``Z4JTaskiqMiddleware._put``).
 
 Mapping:
 
@@ -47,12 +48,37 @@ class Z4JTaskiqMiddleware(TaskiqMiddleware):
         *,
         queue: asyncio.Queue[Event],
         redaction: Any | None = None,
+        loop_source: Any | None = None,
     ) -> None:
         super().__init__()
         self._queue = queue
         self._redaction = redaction
+        # B13: the queue is drained by the z4j agent runtime on ITS OWN
+        # background-thread event loop, while these middleware hooks run on
+        # the taskiq worker's loop -- a DIFFERENT loop in the same process.
+        # ``asyncio.Queue`` is not thread/loop-safe, so a raw put_nowait
+        # from the taskiq loop can corrupt the queue internals and its
+        # wakeup future never fires on the consumer loop (events stall
+        # until the consumer wakes for another reason). We hop to the
+        # consumer loop via call_soon_threadsafe. ``loop_source`` is the
+        # engine adapter, which records its draining loop on
+        # ``_consumer_loop`` when ``subscribe_events`` starts.
+        self._loop_source = loop_source
 
     def _put(self, evt: Event) -> None:
+        consumer_loop = getattr(self._loop_source, "_consumer_loop", None)
+        if consumer_loop is not None and not consumer_loop.is_closed():
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is not consumer_loop:
+                # Cross-loop: schedule the enqueue on the consumer's loop.
+                consumer_loop.call_soon_threadsafe(self._enqueue, evt)
+                return
+        self._enqueue(evt)
+
+    def _enqueue(self, evt: Event) -> None:
         try:
             self._queue.put_nowait(evt)
         except asyncio.QueueFull:
@@ -70,11 +96,14 @@ class Z4JTaskiqMiddleware(TaskiqMiddleware):
         return message
 
     async def post_execute(self, message: TaskiqMessage, result: Any) -> None:
-        # taskiq calls post_execute even on errors when on_error
-        # isn't set; check ``result.is_err`` defensively.
-        is_err = bool(getattr(result, "is_err", False))
-        kind = EventKind.TASK_FAILED if is_err else EventKind.TASK_SUCCEEDED
-        self._put(self._build(kind, message))
+        # B21: only emit the SUCCESS event here. A failed task fires BOTH
+        # post_execute (with is_err=True) AND on_error, so mapping an errored
+        # post_execute to TASK_FAILED double-counted every failure (two
+        # events, distinct uuids -> brain dedup can't collapse them). on_error
+        # is the canonical failure emitter (see below).
+        if bool(getattr(result, "is_err", False)):
+            return
+        self._put(self._build(EventKind.TASK_SUCCEEDED, message))
 
     async def on_error(
         self,
@@ -144,7 +173,9 @@ def attach_to_broker(
         )
     if redaction is None and adapter is not None:
         redaction = getattr(adapter, "redaction", None)
-    middleware = Z4JTaskiqMiddleware(queue=queue, redaction=redaction)
+    # Pass the adapter as the loop source so the middleware can hand events
+    # to the agent's draining loop via call_soon_threadsafe (B13).
+    middleware = Z4JTaskiqMiddleware(queue=queue, redaction=redaction, loop_source=adapter)
     broker.add_middlewares(middleware)
     return middleware
 

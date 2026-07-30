@@ -80,7 +80,14 @@ async def test_post_execute_success_then_failure(adapter):
     evt1 = adapter._event_queue.get_nowait()
     assert evt1.kind == EventKind.TASK_SUCCEEDED
 
+    # B21: an errored post_execute emits NOTHING -- on_error is the
+    # canonical failure emitter, so mapping this to TASK_FAILED would
+    # double-count every failure (post_execute + on_error).
     await mw.post_execute(msg, _ErrResult())
+    assert adapter._event_queue.empty()
+
+    # on_error is what surfaces the failure.
+    await mw.on_error(msg, _ErrResult(), RuntimeError("boom"))
     evt2 = adapter._event_queue.get_nowait()
     assert evt2.kind == EventKind.TASK_FAILED
 
@@ -134,3 +141,61 @@ async def test_pre_send_scrubs_args_with_real_redaction_engine(adapter):
     assert evt.data["args"] == ["visible-value"]
     assert evt.data["kwargs"]["note"] == "keep-me"
     assert evt.data["kwargs"]["password"] != "hunter2"
+
+
+class TestB13CrossLoopHop:
+    """B13: the middleware runs on the taskiq worker loop while the agent
+    drains the queue on its own loop, so a raw put_nowait is cross-loop and
+    unsafe. When a consumer loop is known and differs from the current one,
+    the middleware must hop via call_soon_threadsafe."""
+
+    def test_hops_to_consumer_loop_when_different(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from z4j_core.models import Event
+        from z4j_core.models.event import EventKind
+
+        q: asyncio.Queue = asyncio.Queue(maxsize=10)
+        fake_loop = MagicMock()
+        fake_loop.is_closed.return_value = False
+        source = SimpleNamespace(_consumer_loop=fake_loop)
+        mw = Z4JTaskiqMiddleware(queue=q, loop_source=source)
+
+        evt = Event(
+            id=__import__("uuid").uuid4(),
+            project_id=__import__("uuid").uuid4(),
+            agent_id=__import__("uuid").uuid4(),
+            engine="taskiq",
+            task_id="t1",
+            kind=EventKind.TASK_RECEIVED,
+            occurred_at=__import__("datetime").datetime.now(__import__("datetime").UTC),
+            data={},
+        )
+        # Called with no running loop (running is not fake_loop) -> must hop.
+        mw._put(evt)
+        fake_loop.call_soon_threadsafe.assert_called_once()
+        # The queue was NOT written directly on this (wrong) loop.
+        assert q.empty()
+
+    def test_direct_enqueue_when_no_consumer_loop(self) -> None:
+        import asyncio
+
+        q: asyncio.Queue = asyncio.Queue(maxsize=10)
+        mw = Z4JTaskiqMiddleware(queue=q, loop_source=None)
+        from z4j_core.models import Event
+        from z4j_core.models.event import EventKind
+
+        evt = Event(
+            id=__import__("uuid").uuid4(),
+            project_id=__import__("uuid").uuid4(),
+            agent_id=__import__("uuid").uuid4(),
+            engine="taskiq",
+            task_id="t2",
+            kind=EventKind.TASK_RECEIVED,
+            occurred_at=__import__("datetime").datetime.now(__import__("datetime").UTC),
+            data={},
+        )
+        mw._put(evt)
+        assert q.qsize() == 1

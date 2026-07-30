@@ -63,6 +63,10 @@ class TaskiqEngineAdapter:
         # ``subscribe_events``. Empty until the user wires the
         # middleware via ``z4j_taskiq.events.attach_to_broker``.
         self._event_queue: _aio.Queue[Event] = _aio.Queue(maxsize=10_000)
+        # The loop on which ``subscribe_events`` drains the queue (the z4j
+        # agent runtime loop). Read by the middleware to hand events across
+        # from the taskiq worker loop via call_soon_threadsafe (B13).
+        self._consumer_loop: _aio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------------
     # Discovery
@@ -110,6 +114,11 @@ class TaskiqEngineAdapter:
         Empty until the user attaches the middleware via
         ``attach_to_broker`` (or instantiates it manually).
         """
+        import asyncio as _aio
+
+        # Record the loop we drain on so the middleware (running on the
+        # taskiq worker loop) can hand events across safely (B13).
+        self._consumer_loop = _aio.get_running_loop()
         while True:
             evt = await self._event_queue.get()
             yield evt
