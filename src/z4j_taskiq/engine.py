@@ -3,17 +3,19 @@
 Implements :class:`z4j_core.protocols.QueueEngineAdapter` against
 any taskiq ``AsyncBroker`` instance.
 
-v0 scope: discovery + reconciliation. Action surface (cancel /
-retry / bulk) is intentionally empty in v1 because taskiq's
-broker matrix means each broker needs a different implementation;
-v1.1 will land per-broker support starting with redis-streams.
+The adapter supports discovery, reconciliation, and task submission.
+Operations on existing tasks, including cancel, retry, and bulk actions,
+are not supported because taskiq's broker matrix requires a separate
+implementation for each broker.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import AsyncIterator
-from typing import Any
+import threading
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any, TypeVar
 
 from z4j_core.models import (
     CommandResult,
@@ -33,6 +35,7 @@ from z4j_taskiq.capabilities import DEFAULT_CAPABILITIES
 logger = logging.getLogger("z4j.adapter.taskiq.engine")
 
 ENGINE_NAME = "taskiq"
+_T = TypeVar("_T")
 
 
 class TaskiqEngineAdapter:
@@ -43,6 +46,14 @@ class TaskiqEngineAdapter:
                 NatsBroker, AioPikaBroker, InMemoryBroker, ...).
                 Duck-typed via ``get_all_tasks()`` and
                 ``result_backend``.
+        broker_loop: Event loop that owns the started broker and result
+                backend. z4j's agent runs on a separate background loop, so
+                loop-bound broker calls are marshalled back to this loop.
+                ``attach_to_broker`` captures it during broker startup; pass
+                it explicitly when the adapter is installed from a Taskiq
+                startup callback without that middleware. Until an owner is
+                bound, async broker operations fail closed instead of running
+                on the agent's unrelated background loop.
         redaction: Shared :class:`RedactionEngine`.
     """
 
@@ -53,20 +64,129 @@ class TaskiqEngineAdapter:
         self,
         *,
         broker: Any,
+        broker_loop: asyncio.AbstractEventLoop | None = None,
         redaction: RedactionEngine | None = None,
     ) -> None:
         self.broker = broker
+        self._broker_loop = broker_loop
+        self._broker_loop_disabled = False
+        self._broker_loop_generation = 0
+        self._broker_loop_lock = threading.Lock()
         self.redaction = redaction or RedactionEngine()
-        import asyncio as _aio
 
         # Event queue populated by Z4JTaskiqMiddleware. Drained by
         # ``subscribe_events``. Empty until the user wires the
         # middleware via ``z4j_taskiq.events.attach_to_broker``.
-        self._event_queue: _aio.Queue[Event] = _aio.Queue(maxsize=10_000)
+        self._event_queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=10_000)
         # The loop on which ``subscribe_events`` drains the queue (the z4j
         # agent runtime loop). Read by the middleware to hand events across
         # from the taskiq worker loop via call_soon_threadsafe (B13).
-        self._consumer_loop: _aio.AbstractEventLoop | None = None
+        self._consumer_loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_broker_loop(
+        self,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
+        """Bind async broker operations to the broker's live owner loop.
+
+        Calling this repeatedly with the same loop is idempotent. Rebinding
+        away from a different live loop is rejected because using one broker
+        concurrently from two event loops corrupts loop-owned transports.
+        """
+        owner = loop or asyncio.get_running_loop()
+        with self._broker_loop_lock:
+            previous = self._broker_loop
+            if previous is owner:
+                if self._broker_loop_disabled:
+                    raise RuntimeError(
+                        "Taskiq broker event loop ownership remains disabled "
+                        "after a binding conflict",
+                    )
+                return
+            if previous is not None and previous.is_running() and not previous.is_closed():
+                self._broker_loop_disabled = True
+                self._broker_loop_generation += 1
+                raise RuntimeError(
+                    "Taskiq broker is already bound to a different live event loop",
+                )
+            self._broker_loop = owner
+            self._broker_loop_disabled = False
+            self._broker_loop_generation += 1
+
+    def unbind_broker_loop(self, expected: asyncio.AbstractEventLoop) -> bool:
+        """Clear loop ownership only when ``expected`` is still the owner.
+
+        Taskiq shutdown can race a later startup. A stale middleware must not
+        clear ownership that a newer lifecycle has already established.
+        """
+        with self._broker_loop_lock:
+            if self._broker_loop is not expected:
+                return False
+            self._broker_loop = None
+            self._broker_loop_disabled = False
+            self._broker_loop_generation += 1
+            return True
+
+    async def _await_on_broker_loop(
+        self,
+        operation: Callable[[], Awaitable[_T]],
+    ) -> _T:
+        """Run one broker/backend operation on its owner loop, without retry."""
+        with self._broker_loop_lock:
+            owner = self._broker_loop
+            disabled = self._broker_loop_disabled
+            generation = self._broker_loop_generation
+        current = asyncio.get_running_loop()
+        if disabled:
+            raise RuntimeError(
+                "Taskiq broker event loop ownership is disabled after a binding conflict",
+            )
+        if owner is None:
+            raise RuntimeError(
+                "Taskiq broker event loop is not bound; attach the z4j "
+                "middleware before broker startup or pass broker_loop",
+            )
+        if owner is current:
+            with self._broker_loop_lock:
+                if (
+                    self._broker_loop is not owner
+                    or self._broker_loop_disabled
+                    or self._broker_loop_generation != generation
+                ):
+                    raise RuntimeError(
+                        "Taskiq broker event loop ownership changed before operation started",
+                    )
+                direct_operation = operation()
+            return await direct_operation
+        if owner.is_closed():
+            raise RuntimeError("Taskiq broker event loop is closed")
+        if not owner.is_running():
+            raise RuntimeError("Taskiq broker event loop is not running")
+
+        async def invoke() -> _T:
+            with self._broker_loop_lock:
+                if (
+                    self._broker_loop is not owner
+                    or self._broker_loop_disabled
+                    or self._broker_loop_generation != generation
+                ):
+                    raise RuntimeError(
+                        "Taskiq broker event loop ownership changed before operation started",
+                    )
+                owner_operation = operation()
+            return await owner_operation
+
+        coroutine = invoke()
+        try:
+            concurrent_future = asyncio.run_coroutine_threadsafe(coroutine, owner)
+        except BaseException:
+            coroutine.close()
+            raise
+        try:
+            return await asyncio.wrap_future(concurrent_future)
+        except asyncio.CancelledError:
+            concurrent_future.cancel()
+            raise
 
     # ------------------------------------------------------------------
     # Discovery
@@ -114,11 +234,9 @@ class TaskiqEngineAdapter:
         Empty until the user attaches the middleware via
         ``attach_to_broker`` (or instantiates it manually).
         """
-        import asyncio as _aio
-
         # Record the loop we drain on so the middleware (running on the
         # taskiq worker loop) can hand events across safely (B13).
-        self._consumer_loop = _aio.get_running_loop()
+        self._consumer_loop = asyncio.get_running_loop()
         while True:
             evt = await self._event_queue.get()
             yield evt
@@ -130,21 +248,25 @@ class TaskiqEngineAdapter:
         return []
 
     async def get_task(self, task_id: str) -> Task | None:
+        """Return no task snapshot when only result readiness is available.
+
+        Taskiq's portable result-backend API does not expose the task name,
+        queue, arguments, or lifecycle timestamps required to construct a
+        truthful :class:`Task`.  ``reconcile_task`` remains the supported
+        result-state probe.
+        """
         backend = getattr(self.broker, "result_backend", None)
         if backend is None:
             return None
         try:
-            ready = await backend.is_result_ready(task_id)
+            ready = await self._await_on_broker_loop(
+                lambda: backend.is_result_ready(task_id),
+            )
         except Exception:
             return None
         if not ready:
             return None
-        return Task(
-            engine=self.name,
-            task_id=task_id,
-            name="",
-            state="success",  # refined by reconcile_task
-        )
+        return None
 
     async def reconcile_task(self, task_id: str) -> CommandResult:
         """Probe the broker's result backend.
@@ -169,7 +291,9 @@ class TaskiqEngineAdapter:
             )
 
         try:
-            ready = await backend.is_result_ready(task_id)
+            ready = await self._await_on_broker_loop(
+                lambda: backend.is_result_ready(task_id),
+            )
         except Exception:
             return CommandResult(
                 status="success",
@@ -193,7 +317,9 @@ class TaskiqEngineAdapter:
             )
 
         try:
-            result = await backend.get_result(task_id)
+            result = await self._await_on_broker_loop(
+                lambda: backend.get_result(task_id),
+            )
         except Exception:
             return CommandResult(
                 status="success",
@@ -222,7 +348,7 @@ class TaskiqEngineAdapter:
         )
 
     # ------------------------------------------------------------------
-    # Actions - all unimplemented in v1
+    # Actions
     # ------------------------------------------------------------------
 
     async def submit_task(
@@ -237,7 +363,29 @@ class TaskiqEngineAdapter:
     ) -> CommandResult:
         """Universal enqueue - looks up the registered task by name
         and kicks it via taskiq's normal ``.kiq()`` path.
+
+        The broker-independent Taskiq API has no portable named-queue or
+        priority override, and delayed delivery requires a configured schedule
+        source.  ``None`` and z4j's logical ``"default"`` queue sentinel both
+        select the broker's configured default; refuse real overrides instead
+        of silently misrouting them there.
         """
+        unsupported = [
+            option
+            for option, value in (
+                ("queue", None if queue in (None, "default") else queue),
+                ("eta", eta),
+                ("priority", priority),
+            )
+            if value is not None
+        ]
+        if unsupported:
+            return CommandResult(
+                status="failed",
+                error=(
+                    "z4j-taskiq cannot portably honor submit option(s): " + ", ".join(unsupported)
+                ),
+            )
         try:
             fn = self.broker.find_task(name)
         except Exception as exc:
@@ -248,7 +396,9 @@ class TaskiqEngineAdapter:
                 error=f"unknown taskiq task {name!r}",
             )
         try:
-            sent = await fn.kiq(*args, **(kwargs or {}))
+            sent = await self._await_on_broker_loop(
+                lambda: fn.kiq(*args, **(kwargs or {})),
+            )
         except Exception as exc:
             return CommandResult(status="failed", error=str(exc))
         return CommandResult(
@@ -265,12 +415,14 @@ class TaskiqEngineAdapter:
         eta: float | None = None,
         priority: int | None = None,
     ) -> CommandResult:
-        # Brain polyfills via submit_task using its captured args.
+        # A safe re-submission needs the task name plus both complete argument
+        # collections supplied explicitly; the brain's stored arguments are
+        # redacted and cannot be replayed.
         return CommandResult(
             status="failed",
             error=(
-                "z4j-taskiq has no native retry_task; brain polyfills "
-                "via submit_task with original args"
+                "z4j-taskiq has no native retry_task; re-submit the task "
+                "with both complete argument collections explicitly"
             ),
         )
 
@@ -278,7 +430,7 @@ class TaskiqEngineAdapter:
         return CommandResult(
             status="failed",
             error=(
-                "cancel_task not implemented in z4j-taskiq v1; "
+                "cancel_task is not supported by z4j-taskiq; "
                 "taskiq has no broker-agnostic cancel primitive"
             ),
         )
@@ -291,7 +443,7 @@ class TaskiqEngineAdapter:
     ) -> CommandResult:
         return CommandResult(
             status="failed",
-            error="bulk_retry not implemented in z4j-taskiq v1",
+            error="bulk_retry is not supported by z4j-taskiq",
         )
 
     async def purge_queue(
@@ -303,13 +455,13 @@ class TaskiqEngineAdapter:
     ) -> CommandResult:
         return CommandResult(
             status="failed",
-            error="purge_queue not implemented in z4j-taskiq v1",
+            error="purge_queue is not supported by z4j-taskiq",
         )
 
     async def requeue_dead_letter(self, task_id: str) -> CommandResult:
         return CommandResult(
             status="failed",
-            error="taskiq DLQ semantics are broker-specific; deferred to v1.1",
+            error="taskiq DLQ semantics are broker-specific; requeue is not supported",
         )
 
     async def rate_limit(

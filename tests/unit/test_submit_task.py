@@ -16,6 +16,9 @@ Pinned behaviour:
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 pytest.importorskip("taskiq")
@@ -42,8 +45,11 @@ async def broker():
 
 
 @pytest.fixture
-def adapter(broker) -> TaskiqEngineAdapter:
-    return TaskiqEngineAdapter(broker=broker)
+async def adapter(broker) -> TaskiqEngineAdapter:
+    return TaskiqEngineAdapter(
+        broker=broker,
+        broker_loop=asyncio.get_running_loop(),
+    )
 
 
 def _registered_name(broker, suffix: str) -> str:
@@ -98,3 +104,60 @@ class TestSubmitTask:
             fn.kiq = original_kiq  # type: ignore[method-assign]
         assert result.status == "failed"
         assert "rabbitmq down" in (result.error or "")
+
+    async def test_default_queue_enqueues_but_named_queue_does_not(
+        self,
+        adapter,
+        broker,
+        monkeypatch,
+    ) -> None:
+        name = _registered_name(broker, ":send_email")
+        fn = broker.find_task(name)
+        calls = []
+
+        async def record_call(*args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(task_id="default-queue-task")
+
+        monkeypatch.setattr(fn, "kiq", record_call)
+
+        default_result = await adapter.submit_task(
+            name,
+            args=("alice@example.com",),
+            kwargs={"template": "welcome"},
+            queue="default",
+        )
+        named_result = await adapter.submit_task(name, queue="urgent")
+
+        assert default_result.status == "success"
+        assert default_result.result["task_id"] == "default-queue-task"
+        assert named_result.status == "failed"
+        assert "queue" in (named_result.error or "")
+        assert calls == [(("alice@example.com",), {"template": "welcome"})]
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [("queue", "urgent"), ("eta", 1_800_000_000.0), ("priority", 9)],
+    )
+    async def test_unsupported_delivery_option_does_not_enqueue(
+        self,
+        adapter,
+        broker,
+        monkeypatch,
+        option,
+        value,
+    ) -> None:
+        name = _registered_name(broker, ":send_email")
+        fn = broker.find_task(name)
+        called = False
+
+        async def record_call(*_args, **_kwargs):
+            nonlocal called
+            called = True
+
+        monkeypatch.setattr(fn, "kiq", record_call)
+        result = await adapter.submit_task(name, **{option: value})
+
+        assert result.status == "failed"
+        assert option in (result.error or "")
+        assert called is False

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 pytest.importorskip("taskiq")
@@ -26,14 +28,17 @@ def broker():
 
 
 @pytest.fixture
-def adapter(broker):
-    return TaskiqEngineAdapter(broker=broker)
+async def adapter(broker):
+    return TaskiqEngineAdapter(
+        broker=broker,
+        broker_loop=asyncio.get_running_loop(),
+    )
 
 
 @pytest.mark.asyncio
 async def test_capabilities_unified_in_v1(adapter):
     # v1.0: only the universal submit_task primitive is advertised.
-    # Brain polyfills retry / bulk_retry on top of it. Per-broker
+    # Retry and bulk retry are absent. Per-broker
     # cancel and other actions land in v1.1.
     assert adapter.capabilities() == {"submit_task"}
 
@@ -77,6 +82,18 @@ async def test_reconcile_completed_task_returns_success(broker, adapter):
     res = await adapter.reconcile_task(sent.task_id)
     assert res.status == "success"
     assert res.result["engine_state"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_get_task_does_not_construct_incomplete_task(broker, adapter):
+    add = broker.find_task("add") or next(iter(broker.get_all_tasks().values()))
+    sent = await add.kiq(2, 3)
+    await sent.wait_result(timeout=2)
+
+    # The portable result backend knows readiness, not the metadata required
+    # by the strict Task model. The old code attempted an invalid partial Task
+    # and raised ValidationError for every completed task.
+    assert await adapter.get_task(sent.task_id) is None
 
 
 @pytest.mark.asyncio

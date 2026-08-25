@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -41,7 +42,10 @@ async def test_schedule_fire_end_to_end_through_dispatcher(
     broker,
     buf: BufferStore,
 ) -> None:
-    engine = TaskiqEngineAdapter(broker=broker)
+    engine = TaskiqEngineAdapter(
+        broker=broker,
+        broker_loop=asyncio.get_running_loop(),
+    )
     dispatcher = CommandDispatcher(
         engines={"taskiq": engine},
         schedulers={},

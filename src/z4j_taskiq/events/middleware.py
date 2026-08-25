@@ -15,7 +15,7 @@ Mapping:
 | pre_send        | TASK_RECEIVED     |
 | pre_execute     | TASK_STARTED      |
 | post_execute    | TASK_SUCCEEDED    |
-| on_error        | TASK_FAILED       |
+| on_error        | TASK_RETRIED or TASK_FAILED |
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from taskiq import TaskiqMessage, TaskiqMiddleware
+from taskiq import TaskiqEvents, TaskiqMessage, TaskiqMiddleware
 from z4j_core.models import Event
 from z4j_core.models.event import EventKind
 
@@ -36,7 +36,10 @@ ENGINE_NAME = "taskiq"
 
 
 class Z4JTaskiqMiddleware(TaskiqMiddleware):
-    """Middleware that emits z4j Events for every task lifecycle hop.
+    """Attempt mapped z4j events for Taskiq lifecycle hooks.
+
+    The destination queue is bounded. When it is full, the middleware logs and
+    drops the event rather than delaying the host task.
 
     Args:
         queue: asyncio queue owned by the engine adapter.
@@ -49,6 +52,8 @@ class Z4JTaskiqMiddleware(TaskiqMiddleware):
         queue: asyncio.Queue[Event],
         redaction: Any | None = None,
         loop_source: Any | None = None,
+        consumer_loop: asyncio.AbstractEventLoop | None = None,
+        broker_source: Any | None = None,
     ) -> None:
         super().__init__()
         self._queue = queue
@@ -64,9 +69,66 @@ class Z4JTaskiqMiddleware(TaskiqMiddleware):
         # engine adapter, which records its draining loop on
         # ``_consumer_loop`` when ``subscribe_events`` starts.
         self._loop_source = loop_source
+        self._consumer_loop = consumer_loop
+        self._broker_source = broker_source
+        self._bound_broker_loop: asyncio.AbstractEventLoop | None = None
+        self._binding_disabled = False
+        # Official retry middleware reuses the task id. ``pre_send`` records
+        # the successful re-enqueue here so the originating ``on_error`` does
+        # not also emit a terminal failure.
+        self._retry_enqueued_ids: set[str] = set()
+
+    async def startup(self) -> None:
+        """Capture the loop that owns the started Taskiq broker."""
+        bind_broker_loop = getattr(self._loop_source, "bind_broker_loop", None)
+        if self._binding_disabled or not callable(bind_broker_loop):
+            return
+        owner = asyncio.get_running_loop()
+        try:
+            bind_broker_loop(owner)
+        except Exception as exc:
+            # A z4j ownership conflict must not abort Taskiq host startup. The
+            # adapter marks itself disabled while retaining the prior owner as
+            # a safety lock. Never include the exception body because broker
+            # URLs can carry credentials.
+            self._binding_disabled = True
+            logger.error(  # noqa: TRY400  type-only host-boundary log
+                "z4j-taskiq: broker loop binding failed (%s); adapter commands disabled",
+                type(exc).__name__,
+            )
+            return
+        self._bound_broker_loop = owner
+
+    async def shutdown(self) -> None:
+        """Release only the broker loop captured by this middleware startup."""
+        self._binding_disabled = False
+        owner = self._bound_broker_loop
+        if owner is None:
+            return
+        if asyncio.get_running_loop() is not owner:
+            return
+        self._bound_broker_loop = None
+        unbind_broker_loop = getattr(
+            self._loop_source,
+            "unbind_broker_loop",
+            None,
+        )
+        if not callable(unbind_broker_loop):
+            return
+        try:
+            unbind_broker_loop(owner)
+        except Exception as exc:  # pragma: no cover - defensive host boundary
+            logger.error(  # noqa: TRY400  type-only host-boundary log
+                "z4j-taskiq: broker loop shutdown unbind failed (%s)",
+                type(exc).__name__,
+            )
 
     def _put(self, evt: Event) -> None:
-        consumer_loop = getattr(self._loop_source, "_consumer_loop", None)
+        consumer_loop = self._consumer_loop or getattr(
+            self._loop_source,
+            "_consumer_loop",
+            None,
+        )
         if consumer_loop is not None and not consumer_loop.is_closed():
             try:
                 running = asyncio.get_running_loop()
@@ -88,11 +150,22 @@ class Z4JTaskiqMiddleware(TaskiqMiddleware):
             )
 
     async def pre_send(self, message: TaskiqMessage) -> TaskiqMessage:
-        self._put(self._build(EventKind.TASK_RECEIVED, message))
+        try:
+            retries = int(message.labels.get("_retries", 0) or 0)
+            if retries > 0:
+                self._retry_enqueued_ids.add(message.task_id)
+                self._put(self._build(EventKind.TASK_RETRIED, message))
+            else:
+                self._put(self._build(EventKind.TASK_RECEIVED, message))
+        except Exception as exc:
+            self._log_capture_failure("pre_send", exc)
         return message
 
     async def pre_execute(self, message: TaskiqMessage) -> TaskiqMessage:
-        self._put(self._build(EventKind.TASK_STARTED, message))
+        try:
+            self._put(self._build(EventKind.TASK_STARTED, message))
+        except Exception as exc:
+            self._log_capture_failure("pre_execute", exc)
         return message
 
     async def post_execute(self, message: TaskiqMessage, result: Any) -> None:
@@ -101,9 +174,12 @@ class Z4JTaskiqMiddleware(TaskiqMiddleware):
         # post_execute to TASK_FAILED double-counted every failure (two
         # events, distinct uuids -> brain dedup can't collapse them). on_error
         # is the canonical failure emitter (see below).
-        if bool(getattr(result, "is_err", False)):
-            return
-        self._put(self._build(EventKind.TASK_SUCCEEDED, message))
+        try:
+            if bool(getattr(result, "is_err", False)):
+                return
+            self._put(self._build(EventKind.TASK_SUCCEEDED, message))
+        except Exception as exc:
+            self._log_capture_failure("post_execute", exc)
 
     async def on_error(
         self,
@@ -111,8 +187,75 @@ class Z4JTaskiqMiddleware(TaskiqMiddleware):
         result: Any,
         exception: BaseException,
     ) -> None:
-        evt = self._build(EventKind.TASK_FAILED, message, exception=exception)
-        self._put(evt)
+        try:
+            # An observed pre_send is authoritative proof that SimpleRetry
+            # already re-enqueued this id. Check it before mirroring the retry
+            # decision; some Taskiq versions do not attach ``broker`` to every
+            # middleware instance until worker startup.
+            if message.task_id in self._retry_enqueued_ids:
+                self._retry_enqueued_ids.discard(message.task_id)
+                return
+            if self._official_retry_will_run(message, exception):
+                # SmartRetry with an external schedule source has no broker
+                # pre_send hook, so emit its successful retry decision here.
+                self._put(self._build(EventKind.TASK_RETRIED, message))
+                return
+            evt = self._build(EventKind.TASK_FAILED, message, exception=exception)
+            self._put(evt)
+        except Exception as exc:
+            self._log_capture_failure("on_error", exc)
+
+    def _log_capture_failure(self, hook: str, exc: Exception) -> None:
+        """Log a redacted capture failure without affecting Taskiq control."""
+        logger.error(
+            "z4j-taskiq: %s capture failed (%s); dropping event",
+            hook,
+            type(exc).__name__,
+        )
+
+    def _official_retry_will_run(
+        self,
+        message: TaskiqMessage,
+        exception: BaseException,
+    ) -> bool:
+        """Mirror the supported Taskiq retry middleware decision.
+
+        ``attach_to_broker`` places this middleware first, so Taskiq's reverse
+        error-hook order runs SimpleRetry/SmartRetry before this method. A
+        successful retry decision therefore has already enqueued or scheduled
+        replacement work when this returns true.
+        """
+        broker = self._broker_source or getattr(self, "broker", None)
+        for middleware in getattr(broker, "middlewares", ()):
+            if middleware is self or type(middleware).__name__ not in {
+                "SimpleRetryMiddleware",
+                "SmartRetryMiddleware",
+            }:
+                continue
+            if not type(middleware).__module__.startswith("taskiq"):
+                continue
+            accepted = getattr(middleware, "types_of_exceptions", None)
+            if accepted is not None and not isinstance(exception, tuple(accepted)):
+                continue
+            if type(exception).__name__ == "NoResultError":
+                continue
+            enabled = message.labels.get("retry_on_error")
+            if isinstance(enabled, str):
+                enabled = enabled.lower() == "true"
+            if enabled is None:
+                enabled = getattr(middleware, "default_retry_label", False)
+            if not enabled:
+                continue
+            retries = int(message.labels.get("_retries", 0) or 0) + 1
+            maximum = int(
+                message.labels.get(
+                    "max_retries",
+                    getattr(middleware, "default_retry_count", 0),
+                ),
+            )
+            if retries < maximum:
+                return True
+        return False
 
     def _build(
         self,
@@ -159,24 +302,84 @@ def attach_to_broker(
     adapter: Any | None = None,
     queue: asyncio.Queue[Event] | None = None,
     redaction: Any | None = None,
+    consumer_loop: asyncio.AbstractEventLoop | None = None,
 ) -> Z4JTaskiqMiddleware:
     """Add :class:`Z4JTaskiqMiddleware` to ``broker``.
 
     Pass either an ``adapter`` (the middleware uses
-    ``adapter._event_queue``) or a raw ``queue``.
+    ``adapter._event_queue`` and discovers its consumer loop) or both a raw
+    ``queue`` and the event loop that drains it.  A raw queue without its loop
+    is rejected because Taskiq worker hooks may run on a different loop.
+    Reattaching the same adapter to the same broker is idempotent and returns
+    the existing middleware.
     """
+    if adapter is not None and queue is not None:
+        raise ValueError(
+            "attach_to_broker: provide adapter or raw queue, not both",
+        )
+    if adapter is not None and getattr(adapter, "broker", broker) is not broker:
+        raise ValueError(
+            "attach_to_broker: adapter belongs to a different broker",
+        )
     if queue is None and adapter is not None:
         queue = getattr(adapter, "_event_queue", None)
     if queue is None:
         raise ValueError(
             "attach_to_broker: provide either adapter or queue",
         )
+    if adapter is None and consumer_loop is None:
+        raise ValueError(
+            "attach_to_broker: raw queue requires consumer_loop",
+        )
+    existing_z4j = [
+        existing
+        for existing in getattr(broker, "middlewares", ())
+        if isinstance(existing, Z4JTaskiqMiddleware)
+    ]
+    if existing_z4j:
+        if (
+            len(existing_z4j) == 1
+            and adapter is not None
+            and existing_z4j[0]._loop_source is adapter
+            and existing_z4j[0]._broker_source is broker
+        ):
+            return existing_z4j[0]
+        raise RuntimeError(
+            "attach_to_broker: broker already has z4j middleware for a different adapter or queue",
+        )
     if redaction is None and adapter is not None:
         redaction = getattr(adapter, "redaction", None)
     # Pass the adapter as the loop source so the middleware can hand events
     # to the agent's draining loop via call_soon_threadsafe (B13).
-    middleware = Z4JTaskiqMiddleware(queue=queue, redaction=redaction, loop_source=adapter)
+    middleware = Z4JTaskiqMiddleware(
+        queue=queue,
+        redaction=redaction,
+        loop_source=adapter,
+        consumer_loop=consumer_loop,
+        broker_source=broker,
+    )
     broker.add_middlewares(middleware)
+    # Taskiq calls on_error hooks in reverse middleware order. Keep z4j first
+    # so official retry middleware performs (and proves) its re-enqueue before
+    # z4j decides between RETRIED and terminal FAILED.
+    broker.middlewares.remove(middleware)
+    broker.middlewares.insert(0, middleware)
+
+    # Taskiq invokes lifecycle event handlers across the supported 0.11/0.12
+    # range, while middleware lifecycle coverage varies by version and broker
+    # (InMemoryBroker invokes only CLIENT/WORKER handlers). Register both event
+    # roles as the compatibility path. Newer standard brokers may additionally
+    # call the middleware methods; both methods are deliberately idempotent.
+    async def _z4j_startup(_state: Any) -> None:
+        await middleware.startup()
+
+    async def _z4j_shutdown(_state: Any) -> None:
+        await middleware.shutdown()
+
+    for event in (TaskiqEvents.CLIENT_STARTUP, TaskiqEvents.WORKER_STARTUP):
+        broker.on_event(event)(_z4j_startup)
+    for event in (TaskiqEvents.CLIENT_SHUTDOWN, TaskiqEvents.WORKER_SHUTDOWN):
+        broker.on_event(event)(_z4j_shutdown)
     return middleware
 
 
